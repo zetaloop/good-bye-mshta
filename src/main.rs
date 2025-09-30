@@ -1,11 +1,17 @@
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::OsStrExt;
-use winrt_notification::{Duration, Toast};
+use std::ptr;
 
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::WindowsAndMessaging::{SHOW_WINDOW_CMD, SW_SHOWNORMAL};
-use windows::core::PCWSTR;
+use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Shell::{
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_MODIFY, NIM_SETVERSION,
+    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, HWND_MESSAGE, IDI_INFORMATION, LoadIconW, SHOW_WINDOW_CMD, SW_SHOWNORMAL,
+    WM_USER,
+};
 
 fn main() {
     show_retirement_notice();
@@ -21,20 +27,91 @@ fn main() {
     if let Some(mut request) = parse_shell_execute(&script) {
         request.parameters = expand_parameters(request.parameters.as_ref(), &forwarded);
         if let Err(err) = execute_shell_request(&request) {
-            eprintln!("无法执行 ShellExecute 请求: {err}");
+            eprintln!("Failed to ShellExecute: {err}");
         }
     }
 }
 
 fn show_retirement_notice() {
-    let _ = Toast::new(Toast::POWERSHELL_APP_ID)
-        .title("mshta.exe 已被替换")
-        .text1("mshta 已退役，请使用 PowerShell 或 Python 提权")
-        .duration(Duration::Short) // 由系统控制显示时长
-        .show();
+    unsafe {
+        let Some(hwnd) = create_message_window() else {
+            return;
+        };
+
+        let mut base: NOTIFYICONDATAW = std::mem::zeroed();
+        base.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        base.hWnd = hwnd;
+        base.uID = 1;
+        base.uFlags = NIF_MESSAGE | NIF_TIP;
+        base.uCallbackMessage = WM_USER + 1;
+        write_fixed(&mut base.szTip, "mshta.exe 已被替换");
+
+        let icon = LoadIconW(0, IDI_INFORMATION as usize as *const u16);
+        if icon != 0 {
+            base.uFlags |= NIF_ICON;
+            base.hIcon = icon;
+        }
+
+        if Shell_NotifyIconW(NIM_ADD, &mut base) == 0 {
+            return;
+        }
+
+        let mut version = base;
+        version.Anonymous.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &mut version);
+
+        let mut info = base;
+        info.uFlags = NIF_INFO;
+        info.Anonymous.uTimeout = 1000;
+        info.dwInfoFlags = NIIF_INFO;
+        write_fixed(&mut info.szInfoTitle, "mshta.exe 已被替换");
+        write_fixed(
+            &mut info.szInfo,
+            "mshta 已退役，请使用 PowerShell 或 Python 提权",
+        );
+
+        Shell_NotifyIconW(NIM_MODIFY, &mut info);
+    }
 }
 
-#[derive(Debug)]
+unsafe fn create_message_window() -> Option<HWND> {
+    let instance = unsafe { GetModuleHandleW(ptr::null()) };
+    if instance == 0 {
+        return None;
+    }
+
+    let class_name = wide("STATIC");
+    let hwnd = unsafe {
+        CreateWindowExW(
+            0,
+            class_name.as_ptr(),
+            ptr::null(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            HWND_MESSAGE,
+            0,
+            instance,
+            ptr::null_mut(),
+        )
+    };
+
+    if hwnd == 0 { None } else { Some(hwnd) }
+}
+
+fn write_fixed<const N: usize>(buffer: &mut [u16; N], text: &str) {
+    buffer.fill(0);
+    for (slot, unit) in buffer
+        .iter_mut()
+        .take(N.saturating_sub(1))
+        .zip(OsStr::new(text).encode_wide())
+    {
+        *slot = unit;
+    }
+}
+
 struct ShellExecuteRequest {
     file: String,
     parameters: Option<String>,
@@ -72,7 +149,6 @@ fn parse_shell_execute(script: &str) -> Option<ShellExecuteRequest> {
     let operation = optional_string(&arguments, 3).filter(|s| !s.is_empty());
     let show = optional_string(&arguments, 4)
         .and_then(|value| value.parse::<i32>().ok())
-        .map(SHOW_WINDOW_CMD)
         .unwrap_or(SW_SHOWNORMAL);
 
     Some(ShellExecuteRequest {
@@ -118,16 +194,16 @@ fn execute_shell_request(request: &ShellExecuteRequest) -> Result<(), String> {
 
     let result = unsafe {
         ShellExecuteW(
-            HWND::default(),
+            0,
             option_to_pcwstr(operation.as_ref()),
-            PCWSTR(file.as_ptr()),
+            file.as_ptr(),
             option_to_pcwstr(parameters.as_ref()),
             option_to_pcwstr(directory.as_ref()),
             request.show,
         )
     };
 
-    let code = result.0 as isize;
+    let code = result as isize;
     if code <= 32 {
         Err(format!("ShellExecuteW 返回错误码 {code}"))
     } else {
@@ -309,11 +385,11 @@ fn quote_argument(arg: &OsStr) -> String {
     result
 }
 
-fn option_to_pcwstr(value: Option<&Vec<u16>>) -> PCWSTR {
+fn option_to_pcwstr(value: Option<&Vec<u16>>) -> *const u16 {
     if let Some(buffer) = value {
-        PCWSTR(buffer.as_ptr())
+        buffer.as_ptr()
     } else {
-        PCWSTR::null()
+        std::ptr::null()
     }
 }
 
