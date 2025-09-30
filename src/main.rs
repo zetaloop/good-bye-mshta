@@ -5,12 +5,12 @@ use std::ptr;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{
-    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_MODIFY, NIM_SETVERSION,
-    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NIM_SETVERSION, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, HWND_MESSAGE, IDI_INFORMATION, LoadIconW, SHOW_WINDOW_CMD, SW_SHOWNORMAL,
-    WM_USER,
+    CreateWindowExW, DestroyWindow, HWND_MESSAGE, IDI_INFORMATION, LoadIconW, SHOW_WINDOW_CMD,
+    SW_SHOWNORMAL, WM_USER,
 };
 
 fn main() {
@@ -53,6 +53,7 @@ fn show_retirement_notice() {
         }
 
         if Shell_NotifyIconW(NIM_ADD, &mut base) == 0 {
+            DestroyWindow(hwnd);
             return;
         }
 
@@ -71,6 +72,10 @@ fn show_retirement_notice() {
         );
 
         Shell_NotifyIconW(NIM_MODIFY, &mut info);
+
+        let mut remove = base;
+        Shell_NotifyIconW(NIM_DELETE, &mut remove);
+        DestroyWindow(hwnd);
     }
 }
 
@@ -162,27 +167,33 @@ fn parse_shell_execute(script: &str) -> Option<ShellExecuteRequest> {
 
 fn expand_parameters(parameters: Option<&String>, forwarded: &[OsString]) -> Option<String> {
     let mut result = parameters.cloned().unwrap_or_default();
-    let joined = if forwarded.is_empty() {
-        String::new()
-    } else {
-        join_forwarded_args(forwarded)
-    };
-
     if result.contains("%*") {
-        result = result.replace("%*", joined.as_str());
-    } else if !joined.is_empty() {
-        if result.is_empty() {
-            result = joined;
+        let joined = if forwarded.is_empty() {
+            String::new()
         } else {
-            result.push(' ');
-            result.push_str(&joined);
+            join_forwarded_args(forwarded)
+        };
+        result = result.replace("%*", joined.as_str());
+    } else if !forwarded.is_empty() {
+        let joined = join_forwarded_args(forwarded);
+        if !joined.is_empty() {
+            if result.is_empty() {
+                result = joined;
+            } else {
+                result.reserve(1 + joined.len());
+                result.push(' ');
+                result.push_str(&joined);
+            }
         }
     }
 
-    if result.trim().is_empty() {
+    let trimmed = result.trim();
+    if trimmed.is_empty() {
         None
+    } else if trimmed.len() == result.len() {
+        Some(result)
     } else {
-        Some(result.trim().to_string())
+        Some(trimmed.to_owned())
     }
 }
 
@@ -337,11 +348,19 @@ fn unquote(input: &str) -> Option<String> {
 }
 
 fn join_forwarded_args(args: &[OsString]) -> String {
-    let mut rendered = Vec::new();
+    let mut rendered = String::new();
+    let mut first = true;
     for arg in args {
-        rendered.push(quote_argument(arg));
+        let piece = quote_argument(arg);
+        if first {
+            rendered.push_str(&piece);
+            first = false;
+        } else {
+            rendered.push(' ');
+            rendered.push_str(&piece);
+        }
     }
-    rendered.join(" ")
+    rendered
 }
 
 fn quote_argument(arg: &OsStr) -> String {
@@ -355,21 +374,26 @@ fn quote_argument(arg: &OsStr) -> String {
         return value.into_owned();
     }
 
-    let mut result = String::from('"');
-    let mut backslashes = 0;
+    let mut result = String::with_capacity(value.len() + 2);
+    result.push('"');
+    let mut backslashes = 0usize;
     for ch in value.chars() {
         match ch {
             '\\' => {
                 backslashes += 1;
             }
             '"' => {
-                result.push_str(&"\\".repeat(backslashes * 2 + 1));
+                for _ in 0..(backslashes * 2 + 1) {
+                    result.push('\\');
+                }
                 result.push('"');
                 backslashes = 0;
             }
             _ => {
                 if backslashes > 0 {
-                    result.push_str(&"\\".repeat(backslashes));
+                    for _ in 0..backslashes {
+                        result.push('\\');
+                    }
                     backslashes = 0;
                 }
                 result.push(ch);
@@ -378,7 +402,9 @@ fn quote_argument(arg: &OsStr) -> String {
     }
 
     if backslashes > 0 {
-        result.push_str(&"\\".repeat(backslashes * 2));
+        for _ in 0..(backslashes * 2) {
+            result.push('\\');
+        }
     }
 
     result.push('"');
