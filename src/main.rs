@@ -6,6 +6,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 
 use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
@@ -16,11 +17,64 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SW_SHOWNORMAL, WM_USER,
 };
 
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum Language {
+    Chinese,
+    English,
+}
+
+struct LocalizedStrings {
+    tray_tooltip: &'static str,
+    privileged_title: &'static str,
+    privileged_body: &'static str,
+    legacy_title: &'static str,
+    no_arguments_body: &'static str,
+}
+
+const LOCALIZED_STRINGS_CHINESE: LocalizedStrings = LocalizedStrings {
+    tray_tooltip: "mshta.exe 已被替换",
+    privileged_title: "mshta 提权已过时，请改用",
+    privileged_body: "PowerShell: Start-Process -FilePath \"powershell.exe\" -Verb RunAs -ArgumentList \"<命令>\"\nPython: python -c \"import ctypes; ctypes.windll.shell32.ShellExecuteW(None,'runas','cmd.exe','/c <命令>',None,1)\"\nsudo: sudo <命令>",
+    legacy_title: "mshta 指令已过时，不再支持执行",
+    no_arguments_body: "未传入参数",
+};
+
+const LOCALIZED_STRINGS_ENGLISH: LocalizedStrings = LocalizedStrings {
+    tray_tooltip: "mshta.exe has been replaced",
+    privileged_title: "mshta elevation is deprecated. Use:",
+    privileged_body: "PowerShell: Start-Process -FilePath \"powershell.exe\" -Verb RunAs -ArgumentList \"<command>\"\nPython: python -c \"import ctypes; ctypes.windll.shell32.ShellExecuteW(None,'runas','cmd.exe','/c <command>',None,1)\"\nsudo: sudo <command>",
+    legacy_title: "mshta command is deprecated and no longer supported",
+    no_arguments_body: "No arguments were provided",
+};
+
+fn localized_strings(language: Language) -> &'static LocalizedStrings {
+    match language {
+        Language::Chinese => &LOCALIZED_STRINGS_CHINESE,
+        Language::English => &LOCALIZED_STRINGS_ENGLISH,
+    }
+}
+
+fn detect_language() -> Language {
+    const PRIMARY_LANGUAGE_MASK: u16 = 0x03ff;
+    const PRIMARY_LANGUAGE_CHINESE: u16 = 0x0004;
+    unsafe {
+        let langid = GetUserDefaultUILanguage();
+        if langid != 0 {
+            let primary = langid & PRIMARY_LANGUAGE_MASK;
+            if primary == PRIMARY_LANGUAGE_CHINESE {
+                return Language::Chinese;
+            }
+        }
+    }
+    Language::English
+}
+
 fn main() {
+    let language = detect_language();
     let args: Vec<OsString> = std::env::args_os().collect();
 
     let Some(script_os) = args.get(1) else {
-        show_retirement_notice(&NoticeMessage::no_arguments());
+        show_retirement_notice(language, &NoticeMessage::no_arguments(language));
         return;
     };
 
@@ -28,19 +82,23 @@ fn main() {
 
     match parse_shell_execute(&script) {
         Some(request) => {
-            show_retirement_notice(&NoticeMessage::privileged());
+            show_retirement_notice(language, &NoticeMessage::privileged(language));
             if let Err(err) = execute_shell_request(&request) {
                 eprintln!("Failed to ShellExecute: {err}");
             }
         }
         None => {
             let command_line = render_command_line(&args);
-            show_retirement_notice(&NoticeMessage::legacy_command(&command_line));
+            show_retirement_notice(
+                language,
+                &NoticeMessage::legacy_command(language, &command_line),
+            );
         }
     }
 }
 
-fn show_retirement_notice(message: &NoticeMessage) {
+fn show_retirement_notice(language: Language, message: &NoticeMessage) {
+    let strings = localized_strings(language);
     unsafe {
         let Some(hwnd) = create_message_window() else {
             return;
@@ -52,7 +110,7 @@ fn show_retirement_notice(message: &NoticeMessage) {
         base.uID = 1;
         base.uFlags = NIF_MESSAGE | NIF_TIP;
         base.uCallbackMessage = WM_USER + 1;
-        write_fixed(&mut base.szTip, "mshta.exe 已被替换");
+        write_fixed(&mut base.szTip, strings.tray_tooltip);
 
         let icon = LoadIconW(0, IDI_INFORMATION as usize as *const u16);
         if icon != 0 {
@@ -89,26 +147,27 @@ struct NoticeMessage {
 }
 
 impl NoticeMessage {
-    fn privileged() -> Self {
+    fn privileged(language: Language) -> Self {
+        let strings = localized_strings(language);
         Self {
-            title: "mshta 提权已过时，请改用",
-            body: Cow::Borrowed(
-                "PowerShell: Start-Process -FilePath \"powershell.exe\" -Verb RunAs -ArgumentList \"<命令>\"\nPython: python -c \"import ctypes; ctypes.windll.shell32.ShellExecuteW(None,'runas','cmd.exe','/c <命令>',None,1)\"\nsudo: sudo <命令>",
-            ),
+            title: strings.privileged_title,
+            body: Cow::Borrowed(strings.privileged_body),
         }
     }
 
-    fn legacy_command(command_line: &str) -> Self {
+    fn legacy_command(language: Language, command_line: &str) -> Self {
+        let strings = localized_strings(language);
         Self {
-            title: "mshta 指令已过时，不再支持执行",
+            title: strings.legacy_title,
             body: Cow::Owned(truncate_with_ellipsis(command_line, 256)),
         }
     }
 
-    fn no_arguments() -> Self {
+    fn no_arguments(language: Language) -> Self {
+        let strings = localized_strings(language);
         Self {
-            title: "mshta 指令已过时，不再支持执行",
-            body: Cow::Borrowed("未传入参数"),
+            title: strings.legacy_title,
+            body: Cow::Borrowed(strings.no_arguments_body),
         }
     }
 }
