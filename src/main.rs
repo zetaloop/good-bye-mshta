@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
@@ -14,17 +15,33 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 fn main() {
-    show_retirement_notice();
+    let args: Vec<OsString> = std::env::args_os().collect();
 
-    let mut raw_args = std::env::args_os().skip(1);
-    let Some(script_os) = raw_args.next() else {
+    if args.len() <= 1 {
+        show_retirement_notice(&NoticeMessage::no_arguments());
         return;
+    }
+
+    let script_os = args[1].clone();
+    let forwarded: Vec<OsString> = args.iter().skip(2).cloned().collect();
+    let script = script_os.to_string_lossy().into_owned();
+
+    let command_line = render_command_line(&args);
+
+    let request = parse_shell_execute(&script);
+    let is_privileged = request
+        .as_ref()
+        .map(|req| is_privileged_request(req))
+        .unwrap_or(false);
+
+    let notice = if is_privileged {
+        NoticeMessage::privileged()
+    } else {
+        NoticeMessage::legacy_command(&command_line)
     };
+    show_retirement_notice(&notice);
 
-    let forwarded: Vec<OsString> = raw_args.collect();
-    let script = script_os.to_string_lossy();
-
-    if let Some(mut request) = parse_shell_execute(&script) {
+    if let Some(mut request) = request {
         request.parameters = expand_parameters(request.parameters.as_ref(), &forwarded);
         if let Err(err) = execute_shell_request(&request) {
             eprintln!("Failed to ShellExecute: {err}");
@@ -32,7 +49,7 @@ fn main() {
     }
 }
 
-fn show_retirement_notice() {
+fn show_retirement_notice(message: &NoticeMessage) {
     unsafe {
         let Some(hwnd) = create_message_window() else {
             return;
@@ -65,17 +82,44 @@ fn show_retirement_notice() {
         info.uFlags = NIF_INFO;
         info.Anonymous.uTimeout = 1000;
         info.dwInfoFlags = NIIF_INFO;
-        write_fixed(&mut info.szInfoTitle, "mshta.exe 已被替换");
-        write_fixed(
-            &mut info.szInfo,
-            "mshta 已退役，请使用 PowerShell 或 Python 提权",
-        );
+        write_fixed(&mut info.szInfoTitle, message.title);
+        write_fixed(&mut info.szInfo, message.body.as_ref());
 
         Shell_NotifyIconW(NIM_MODIFY, &mut info);
 
         let mut remove = base;
         Shell_NotifyIconW(NIM_DELETE, &mut remove);
         DestroyWindow(hwnd);
+    }
+}
+
+struct NoticeMessage {
+    title: &'static str,
+    body: Cow<'static, str>,
+}
+
+impl NoticeMessage {
+    fn privileged() -> Self {
+        Self {
+            title: "mshta 提权已过时，请改用",
+            body: Cow::Borrowed(
+                "PowerShell: Start-Process -FilePath \"powershell.exe\" -Verb RunAs -ArgumentList \"<命令>\"\nPython: python -c \"import ctypes; ctypes.windll.shell32.ShellExecuteW(None,'runas','cmd.exe','/c <命令>',None,1)\"\nsudo: sudo <命令>",
+            ),
+        }
+    }
+
+    fn legacy_command(command_line: &str) -> Self {
+        Self {
+            title: "mshta 指令已过时，不再支持执行",
+            body: Cow::Owned(truncate_with_ellipsis(command_line, 256)),
+        }
+    }
+
+    fn no_arguments() -> Self {
+        Self {
+            title: "mshta 指令已过时，不再支持执行",
+            body: Cow::Borrowed("未传入参数"),
+        }
     }
 }
 
@@ -131,12 +175,10 @@ fn parse_shell_execute(script: &str) -> Option<ShellExecuteRequest> {
     if !lower.starts_with("vbscript:") {
         return None;
     }
-    if !lower.contains("createobject(\"shell.application\")") {
-        return None;
-    }
 
-    let exec_pos = lower.find(".shellexecute")?;
-    let after_exec = script[exec_pos + ".ShellExecute".len()..].trim_start();
+    let name_pos = lower.find("shellexecute")?;
+    let after_name = &script[name_pos + "shellexecute".len()..];
+    let after_exec = after_name.trim_start();
     if !after_exec.starts_with('(') {
         return None;
     }
@@ -195,6 +237,45 @@ fn expand_parameters(parameters: Option<&String>, forwarded: &[OsString]) -> Opt
     } else {
         Some(trimmed.to_owned())
     }
+}
+
+fn is_privileged_request(request: &ShellExecuteRequest) -> bool {
+    request
+        .operation
+        .as_ref()
+        .is_some_and(|op| op.eq_ignore_ascii_case("runas"))
+}
+
+fn render_command_line(args: &[OsString]) -> String {
+    let mut rendered = String::new();
+    let mut first = true;
+    for arg in args {
+        let piece = quote_argument(arg);
+        if first {
+            rendered.push_str(&piece);
+            first = false;
+        } else {
+            rendered.push(' ');
+            rendered.push_str(&piece);
+        }
+    }
+    rendered
+}
+
+fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
+    let mut result = String::with_capacity(max_chars + 1);
+    let mut count = 0;
+    for ch in text.chars() {
+        if count >= max_chars {
+            result.push('.');
+            result.push('.');
+            result.push('.');
+            return result;
+        }
+        result.push(ch);
+        count += 1;
+    }
+    result
 }
 
 fn execute_shell_request(request: &ShellExecuteRequest) -> Result<(), String> {
