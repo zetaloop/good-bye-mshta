@@ -60,14 +60,14 @@ fn show_retirement_notice(message: &NoticeMessage) {
             base.hIcon = icon;
         }
 
-        if Shell_NotifyIconW(NIM_ADD, &mut base) == 0 {
+        if Shell_NotifyIconW(NIM_ADD, &base) == 0 {
             DestroyWindow(hwnd);
             return;
         }
 
         let mut version = base;
         version.Anonymous.uVersion = NOTIFYICON_VERSION_4;
-        Shell_NotifyIconW(NIM_SETVERSION, &mut version);
+        Shell_NotifyIconW(NIM_SETVERSION, &version);
 
         let mut info = base;
         info.uFlags = NIF_INFO;
@@ -76,10 +76,10 @@ fn show_retirement_notice(message: &NoticeMessage) {
         write_fixed(&mut info.szInfoTitle, message.title);
         write_fixed(&mut info.szInfo, message.body.as_ref());
 
-        Shell_NotifyIconW(NIM_MODIFY, &mut info);
+        Shell_NotifyIconW(NIM_MODIFY, &info);
 
-        let mut remove = base;
-        Shell_NotifyIconW(NIM_DELETE, &mut remove);
+        let remove = base;
+        Shell_NotifyIconW(NIM_DELETE, &remove);
         DestroyWindow(hwnd);
     }
 }
@@ -216,16 +216,12 @@ fn render_command_line(args: &[OsString]) -> String {
 
 fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
     let mut result = String::with_capacity(max_chars + 1);
-    let mut count = 0;
-    for ch in text.chars() {
-        if count >= max_chars {
-            result.push('.');
-            result.push('.');
-            result.push('.');
+    for (index, ch) in text.chars().enumerate() {
+        if index >= max_chars {
+            result.push_str("...");
             return result;
         }
         result.push(ch);
-        count += 1;
     }
     result
 }
