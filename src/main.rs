@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::OsStrExt;
@@ -251,7 +253,9 @@ fn execute_shell_request(request: &ShellExecuteRequest) -> Result<(), String> {
 fn split_parentheses(segment: &str) -> Option<String> {
     let mut chars = segment.chars().peekable();
     let first = chars.next()?;
-    if first != '(' { return None; }
+    if first != '(' {
+        return None;
+    }
 
     let mut in_string = false;
     let mut buffer = String::new();
