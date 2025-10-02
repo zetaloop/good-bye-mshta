@@ -23,28 +23,19 @@ fn main() {
     }
 
     let script_os = args[1].clone();
-    let forwarded: Vec<OsString> = args.iter().skip(2).cloned().collect();
     let script = script_os.to_string_lossy().into_owned();
 
     let command_line = render_command_line(&args);
 
-    let request = parse_shell_execute(&script);
-    let is_privileged = request
-        .as_ref()
-        .map(|req| is_privileged_request(req))
-        .unwrap_or(false);
-
-    let notice = if is_privileged {
-        NoticeMessage::privileged()
-    } else {
-        NoticeMessage::legacy_command(&command_line)
-    };
-    show_retirement_notice(&notice);
-
-    if let Some(mut request) = request {
-        request.parameters = expand_parameters(request.parameters.as_ref(), &forwarded);
-        if let Err(err) = execute_shell_request(&request) {
-            eprintln!("Failed to ShellExecute: {err}");
+    match parse_shell_execute(&script) {
+        Some(request) => {
+            show_retirement_notice(&NoticeMessage::privileged());
+            if let Err(err) = execute_shell_request(&request) {
+                eprintln!("Failed to ShellExecute: {err}");
+            }
+        }
+        None => {
+            show_retirement_notice(&NoticeMessage::legacy_command(&command_line));
         }
     }
 }
@@ -205,45 +196,6 @@ fn parse_shell_execute(script: &str) -> Option<ShellExecuteRequest> {
         operation,
         show,
     })
-}
-
-fn expand_parameters(parameters: Option<&String>, forwarded: &[OsString]) -> Option<String> {
-    let mut result = parameters.cloned().unwrap_or_default();
-    if result.contains("%*") {
-        let joined = if forwarded.is_empty() {
-            String::new()
-        } else {
-            join_forwarded_args(forwarded)
-        };
-        result = result.replace("%*", joined.as_str());
-    } else if !forwarded.is_empty() {
-        let joined = join_forwarded_args(forwarded);
-        if !joined.is_empty() {
-            if result.is_empty() {
-                result = joined;
-            } else {
-                result.reserve(1 + joined.len());
-                result.push(' ');
-                result.push_str(&joined);
-            }
-        }
-    }
-
-    let trimmed = result.trim();
-    if trimmed.is_empty() {
-        None
-    } else if trimmed.len() == result.len() {
-        Some(result)
-    } else {
-        Some(trimmed.to_owned())
-    }
-}
-
-fn is_privileged_request(request: &ShellExecuteRequest) -> bool {
-    request
-        .operation
-        .as_ref()
-        .is_some_and(|op| op.eq_ignore_ascii_case("runas"))
 }
 
 fn render_command_line(args: &[OsString]) -> String {
@@ -426,22 +378,6 @@ fn unquote(input: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
-}
-
-fn join_forwarded_args(args: &[OsString]) -> String {
-    let mut rendered = String::new();
-    let mut first = true;
-    for arg in args {
-        let piece = quote_argument(arg);
-        if first {
-            rendered.push_str(&piece);
-            first = false;
-        } else {
-            rendered.push(' ');
-            rendered.push_str(&piece);
-        }
-    }
-    rendered
 }
 
 fn quote_argument(arg: &OsStr) -> String {
