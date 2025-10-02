@@ -17,15 +17,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
 
-    if args.len() <= 1 {
+    let Some(script_os) = args.get(1) else {
         show_retirement_notice(&NoticeMessage::no_arguments());
         return;
-    }
+    };
 
-    let script_os = args[1].clone();
-    let script = script_os.to_string_lossy().into_owned();
-
-    let command_line = render_command_line(&args);
+    let script = script_os.to_string_lossy();
 
     match parse_shell_execute(&script) {
         Some(request) => {
@@ -35,6 +32,7 @@ fn main() {
             }
         }
         None => {
+            let command_line = render_command_line(&args);
             show_retirement_notice(&NoticeMessage::legacy_command(&command_line));
         }
     }
@@ -78,8 +76,7 @@ fn show_retirement_notice(message: &NoticeMessage) {
 
         Shell_NotifyIconW(NIM_MODIFY, &info);
 
-        let remove = base;
-        Shell_NotifyIconW(NIM_DELETE, &remove);
+        Shell_NotifyIconW(NIM_DELETE, &base);
         DestroyWindow(hwnd);
     }
 }
@@ -215,7 +212,7 @@ fn render_command_line(args: &[OsString]) -> String {
 }
 
 fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
-    let mut result = String::with_capacity(max_chars + 1);
+    let mut result = String::with_capacity(max_chars + 3);
     for (index, ch) in text.chars().enumerate() {
         if index >= max_chars {
             result.push_str("...");
@@ -228,17 +225,17 @@ fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
 
 fn execute_shell_request(request: &ShellExecuteRequest) -> Result<(), String> {
     let file = wide(&request.file);
-    let parameters = request.parameters.as_ref().map(|value| wide(value));
-    let directory = request.directory.as_ref().map(|value| wide(value));
-    let operation = request.operation.as_ref().map(|value| wide(value));
+    let parameters = request.parameters.as_deref().map(wide);
+    let directory = request.directory.as_deref().map(wide);
+    let operation = request.operation.as_deref().map(wide);
 
     let result = unsafe {
         ShellExecuteW(
             0,
-            option_to_pcwstr(operation.as_ref()),
+            option_to_pcwstr(operation.as_deref()),
             file.as_ptr(),
-            option_to_pcwstr(parameters.as_ref()),
-            option_to_pcwstr(directory.as_ref()),
+            option_to_pcwstr(parameters.as_deref()),
+            option_to_pcwstr(directory.as_deref()),
             request.show,
         )
     };
@@ -252,30 +249,22 @@ fn execute_shell_request(request: &ShellExecuteRequest) -> Result<(), String> {
 }
 
 fn split_parentheses(segment: &str) -> Option<String> {
-    let mut chars = segment.chars().enumerate();
+    let mut chars = segment.chars().peekable();
+    let first = chars.next()?;
+    if first != '(' { return None; }
+
     let mut in_string = false;
     let mut buffer = String::new();
 
-    while let Some((idx, ch)) = chars.next() {
-        if idx == 0 {
-            if ch != '(' {
-                return None;
-            }
-            continue;
-        }
-
+    while let Some(ch) = chars.next() {
         match ch {
             '"' => {
                 buffer.push(ch);
                 if in_string {
-                    if let Some((_, next)) = chars.clone().next() {
-                        if next == '"' {
-                            // Escaped quote
-                            chars.next();
-                            buffer.push('"');
-                        } else {
-                            in_string = false;
-                        }
+                    if let Some('"') = chars.peek().copied() {
+                        // Escaped quote
+                        buffer.push('"');
+                        chars.next();
                     } else {
                         in_string = false;
                     }
@@ -283,9 +272,7 @@ fn split_parentheses(segment: &str) -> Option<String> {
                     in_string = true;
                 }
             }
-            ')' if !in_string => {
-                return Some(buffer);
-            }
+            ')' if !in_string => return Some(buffer),
             _ => buffer.push(ch),
         }
     }
@@ -424,12 +411,8 @@ fn quote_argument(arg: &OsStr) -> String {
     result
 }
 
-fn option_to_pcwstr(value: Option<&Vec<u16>>) -> *const u16 {
-    if let Some(buffer) = value {
-        buffer.as_ptr()
-    } else {
-        std::ptr::null()
-    }
+fn option_to_pcwstr(value: Option<&[u16]>) -> *const u16 {
+    value.map_or(ptr::null(), |buf| buf.as_ptr())
 }
 
 fn wide(input: &str) -> Vec<u16> {
