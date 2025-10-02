@@ -26,7 +26,6 @@ enum Language {
 struct LocalizedStrings {
     tray_tooltip: &'static str,
     privileged_title: &'static str,
-    privileged_body: &'static str,
     legacy_title: &'static str,
     no_arguments_body: &'static str,
 }
@@ -34,7 +33,6 @@ struct LocalizedStrings {
 const LOCALIZED_STRINGS_CHINESE: LocalizedStrings = LocalizedStrings {
     tray_tooltip: "mshta.exe 已被替换",
     privileged_title: "mshta 提权已过时，请改用",
-    privileged_body: "PowerShell: Start-Process -FilePath \"powershell.exe\" -Verb RunAs -ArgumentList \"<命令>\"\nPython: python -c \"import ctypes; ctypes.windll.shell32.ShellExecuteW(None,'runas','cmd.exe','/c <命令>',None,1)\"\nsudo: sudo <命令>",
     legacy_title: "mshta 指令已过时，不再支持执行",
     no_arguments_body: "未传入参数",
 };
@@ -42,7 +40,6 @@ const LOCALIZED_STRINGS_CHINESE: LocalizedStrings = LocalizedStrings {
 const LOCALIZED_STRINGS_ENGLISH: LocalizedStrings = LocalizedStrings {
     tray_tooltip: "mshta.exe has been replaced",
     privileged_title: "mshta elevation is deprecated. Use:",
-    privileged_body: "PowerShell: Start-Process -FilePath \"powershell.exe\" -Verb RunAs -ArgumentList \"<command>\"\nPython: python -c \"import ctypes; ctypes.windll.shell32.ShellExecuteW(None,'runas','cmd.exe','/c <command>',None,1)\"\nsudo: sudo <command>",
     legacy_title: "mshta command is deprecated and no longer supported",
     no_arguments_body: "No arguments were provided",
 };
@@ -82,7 +79,7 @@ fn main() {
 
     match parse_shell_execute(&script) {
         Some(request) => {
-            show_retirement_notice(language, &NoticeMessage::privileged(language));
+            show_retirement_notice(language, &NoticeMessage::privileged(language, &request));
             if let Err(err) = execute_shell_request(&request) {
                 eprintln!("Failed to ShellExecute: {err}");
             }
@@ -147,11 +144,12 @@ struct NoticeMessage {
 }
 
 impl NoticeMessage {
-    fn privileged(language: Language) -> Self {
+    fn privileged(language: Language, request: &ShellExecuteRequest) -> Self {
         let strings = localized_strings(language);
+        let body = build_privileged_body(request);
         Self {
             title: strings.privileged_title,
-            body: Cow::Borrowed(strings.privileged_body),
+            body: Cow::Owned(body),
         }
     }
 
@@ -159,7 +157,7 @@ impl NoticeMessage {
         let strings = localized_strings(language);
         Self {
             title: strings.legacy_title,
-            body: Cow::Owned(truncate_with_ellipsis(command_line, 256)),
+            body: Cow::Owned(command_line.to_string()),
         }
     }
 
@@ -172,6 +170,68 @@ impl NoticeMessage {
     }
 }
 
+fn build_privileged_body(req: &ShellExecuteRequest) -> String {
+    let mut ps_cmd = String::from(
+        "powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command \"$ws = New-Object -ComObject WScript.Shell; $null = $ws.ShellExecute('",
+    );
+    ps_cmd.push_str(&ps_single_quote(&req.file));
+    ps_cmd.push_str("', '");
+    ps_cmd.push_str(&ps_single_quote(req.parameters.as_deref().unwrap_or("")));
+    ps_cmd.push_str("', '");
+    ps_cmd.push_str(&ps_single_quote(req.directory.as_deref().unwrap_or("")));
+    ps_cmd.push_str("', '");
+    ps_cmd.push_str(&ps_single_quote(req.operation.as_deref().unwrap_or("")));
+    ps_cmd.push_str("', ");
+    ps_cmd.push_str(&req.show.to_string());
+    ps_cmd.push_str(")\"");
+
+    let mut py_cmd =
+        String::from("pythonw -c \"import sys,ctypes; f,p,d,o,s=sys.argv[1:6]; s=int(s); ");
+    py_cmd.push_str(
+        "r=ctypes.windll.shell32.ShellExecuteW(None, (o if o else None), f, (p if p else None), (d if d else None), s); "
+    );
+    py_cmd.push_str("sys.exit(0 if r>32 else 1)\"");
+
+    py_cmd.push(' ');
+    py_cmd.push_str(&quote_arg_str_always(&req.file));
+    py_cmd.push(' ');
+    py_cmd.push_str(&quote_arg_str_always(
+        req.parameters.as_deref().unwrap_or(""),
+    ));
+    py_cmd.push(' ');
+    py_cmd.push_str(&quote_arg_str_always(
+        req.directory.as_deref().unwrap_or(""),
+    ));
+    py_cmd.push(' ');
+    py_cmd.push_str(&quote_arg_str_always(
+        req.operation.as_deref().unwrap_or(""),
+    ));
+    py_cmd.push(' ');
+    py_cmd.push_str(&req.show.to_string());
+
+    let mut body = String::new();
+    body.push_str(&ps_cmd);
+    body.push('\n');
+    body.push_str(&py_cmd);
+    body
+}
+
+fn ps_single_quote(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch == '\'' {
+            out.push('\'');
+            out.push('\'');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn quote_arg_str_always(input: &str) -> String {
+    quote_argument_impl(input, true)
+}
 unsafe fn create_message_window() -> Option<HWND> {
     let instance = unsafe { GetModuleHandleW(ptr::null()) };
     if instance == 0 {
@@ -201,13 +261,44 @@ unsafe fn create_message_window() -> Option<HWND> {
 
 fn write_fixed<const N: usize>(buffer: &mut [u16; N], text: &str) {
     buffer.fill(0);
-    for (slot, unit) in buffer
-        .iter_mut()
-        .take(N.saturating_sub(1))
-        .zip(OsStr::new(text).encode_wide())
-    {
-        *slot = unit;
+    if N == 0 {
+        return;
     }
+
+    let max_units = N - 1;
+    if max_units == 0 {
+        return;
+    }
+
+    let mut units: Vec<u16> = OsStr::new(text).encode_wide().collect();
+    if units.len() > max_units {
+        units.truncate(max_units);
+
+        if units
+            .last()
+            .is_some_and(|last| (0xD800..=0xDBFF).contains(last))
+        {
+            units.pop();
+        }
+
+        const DOT: u16 = '.' as u16;
+        if units.len() >= 3 {
+            let len = units.len();
+            units[len - 3] = DOT;
+            units[len - 2] = DOT;
+            units[len - 1] = DOT;
+        } else {
+            for unit in units.iter_mut() {
+                *unit = DOT;
+            }
+            while units.len() < max_units && units.len() < 3 {
+                units.push(DOT);
+            }
+        }
+    }
+
+    let copy_len = units.len().min(max_units);
+    buffer[..copy_len].copy_from_slice(&units[..copy_len]);
 }
 
 struct ShellExecuteRequest {
@@ -270,18 +361,6 @@ fn render_command_line(args: &[OsString]) -> String {
         }
     }
     rendered
-}
-
-fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
-    let mut result = String::with_capacity(max_chars + 3);
-    for (index, ch) in text.chars().enumerate() {
-        if index >= max_chars {
-            result.push_str("...");
-            return result;
-        }
-        result.push(ch);
-    }
-    result
 }
 
 fn execute_shell_request(request: &ShellExecuteRequest) -> Result<(), String> {
@@ -427,14 +506,18 @@ fn unquote(input: &str) -> Option<String> {
 }
 
 fn quote_argument(arg: &OsStr) -> String {
-    let value = arg.to_string_lossy();
+    quote_argument_impl(arg.to_string_lossy(), false)
+}
+
+fn quote_argument_impl<S: AsRef<str>>(value: S, always_quote: bool) -> String {
+    let value = value.as_ref();
     if value.is_empty() {
         return "\"\"".to_string();
     }
 
-    let needs_quotes = value.chars().any(|ch| ch.is_whitespace() || ch == '"');
+    let needs_quotes = always_quote || value.chars().any(|ch| ch.is_whitespace() || ch == '"');
     if !needs_quotes {
-        return value.into_owned();
+        return value.to_string();
     }
 
     let mut result = String::with_capacity(value.len() + 2);
@@ -442,9 +525,7 @@ fn quote_argument(arg: &OsStr) -> String {
     let mut backslashes = 0usize;
     for ch in value.chars() {
         match ch {
-            '\\' => {
-                backslashes += 1;
-            }
+            '\\' => backslashes += 1,
             '"' => {
                 for _ in 0..(backslashes * 2 + 1) {
                     result.push('\\');
@@ -463,13 +544,11 @@ fn quote_argument(arg: &OsStr) -> String {
             }
         }
     }
-
     if backslashes > 0 {
         for _ in 0..(backslashes * 2) {
             result.push('\\');
         }
     }
-
     result.push('"');
     result
 }
