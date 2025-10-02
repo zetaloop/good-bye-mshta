@@ -185,10 +185,10 @@ fn build_privileged_body(req: &ShellExecuteRequest) -> String {
     ps_cmd.push_str(&req.show.to_string());
     ps_cmd.push_str(")\"");
 
-    let mut py_cmd =
-        String::from("pythonw -c \"import sys,ctypes; f,p,d,o,s=sys.argv[1:6]; s=int(s); ");
+    let mut py_cmd = String::from("pythonw -c \"import sys,ctypes; f,p,d,o,s=sys.argv[1:6]; ");
+    py_cmd.push_str("ctypes.windll.shell32.ShellExecuteW.restype=ctypes.c_void_p; ");
     py_cmd.push_str(
-        "r=ctypes.windll.shell32.ShellExecuteW(None, (o if o else None), f, (p if p else None), (d if d else None), s); "
+        "r=ctypes.windll.shell32.ShellExecuteW(None, o or None, f, p or None, d or None, int(s)); ",
     );
     py_cmd.push_str("sys.exit(0 if r>32 else 1)\"");
 
