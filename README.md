@@ -1,10 +1,11 @@
 # Good Bye MSHTA
 
-<p align="center">
-  <img src="good-bye-mshta.png" alt="Good Bye MSHTA Logo" width="150"/>
-</p>
-
-A simple tool that intercepts `mshta.exe` calls and helps transition legacy elevation scripts to modern alternatives.
+<table>
+<tr>
+<td><img src="good-bye-mshta.png" alt="Good Bye MSHTA Logo" width="50"/></td>
+<td>A simple tool that intercepts <code>mshta.exe</code> calls and helps transition legacy elevation scripts to modern alternatives.</td>
+</tr>
+</table>
 
 ## Why This Exists
 
